@@ -5,4 +5,4 @@ This repo contains unofficial implementations of DL model quantization methods.
 
 - MBQuant.py is implementation of Distribution-Aware Adaptive Multi-Bit Quantization (Zhao et al, 2021)
 
-Codes might be 'messy' due to the fact that the codes were original meant to satisfy personal needs and not publicly accessible.
+Codes might be 'messy' due to the fact that the implementation is meant to satisfy personal curiosity and not publicly accessible.
