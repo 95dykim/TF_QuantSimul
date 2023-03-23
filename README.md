@@ -1,5 +1,5 @@
 # TF_QuantSimul
-This repo contains unofficial implementations of following DL model quantization methods.
+This repo contains unofficial implementations of following DL model quantization methods:
 
 - QuantSimul.py is implementation of Quantization and Training of Neural Networks for Efficient Integer-Arithmetic-Only Inference (Jacob et al, 2017)
 
