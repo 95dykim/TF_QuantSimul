@@ -7,4 +7,4 @@ This repo contains unofficial implementations of following DL model quantization
 
 The codes are meant to simulate the effects of quantization methods, rather than actually quantize models to mixed precision models. 
 
-Codes might be 'messy' due to the fact that the implementation is meant to satisfy personal curiosity and not publicly accessible.
+Codes might be 'messy' due to the fact that the implementations are meant to satisfy personal curiosity and not publicly accessible.
