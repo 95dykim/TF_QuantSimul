@@ -3,6 +3,9 @@ import numpy as np
 
 from utils import round_differentiable
 
+"""
+Get LUT and LUT edge values from the paper
+"""
 def get_LUT():
     def finder( maxlen, cur = [], found = [] ):
         if len(cur) == maxlen:
@@ -40,6 +43,7 @@ TYPE_W_DENSE = 2
 #def round_differentiable(x):
 #    return x - tf.stop_gradient(x - tf.round(x))
 
+#Distribution-aware quantization
 @tf.function
 def MBQuant( x, vec_bitwidth, l_type ):
     if l_type == TYPE_W_CONV:
@@ -54,10 +58,12 @@ def MBQuant( x, vec_bitwidth, l_type ):
     x_mean = tf.reduce_mean( x, axis=axis, keepdims=True )
     x_mad = tf.reduce_mean( tf.abs( x - x_mean ), axis=axis, keepdims=True )
     
-    # x_mad에 미세한 값을 추가해서 divide by zero 방지
+    # preventing divide by zero
     x_norm = (x - x_mean)/(x_mad + 0.0000001)
     
-    bq_0 = x_norm*0.0
+    #Implementation of LUT
+    #TODO - FIND A BETTER WAY TO IMPLEMENT THIS
+    bq_0 = x_norm*0.0 #soft pruning
     bq_1 = tf.gather( LUT_1, tf.raw_ops.Bucketize(input=x_norm, boundaries=LUT_EDGE_1) )
     bq_2 = tf.gather( LUT_2, tf.raw_ops.Bucketize(input=x_norm, boundaries=LUT_EDGE_2) )
     bq_3 = tf.gather( LUT_3, tf.raw_ops.Bucketize(input=x_norm, boundaries=LUT_EDGE_3) )
@@ -73,12 +79,14 @@ def MBQuant( x, vec_bitwidth, l_type ):
     
     return x_quant
 
+#Uniform quantization
 @tf.function
 def MBQuant_uniform( x, vec_bitwidth, tau ):
     q_level = tf.cast( 2**vec_bitwidth-1, tf.float32 )
     act_quantized = round_differentiable( tf.minimum( tf.maximum( x/tau, 0.0 ), 1.0 ) * q_level )
     return act_quantized * tau / q_level
 
+#Conv2D Layer with quantized outputs
 @tf.keras.utils.register_keras_serializable()
 class MBQuantSimulConv2D(tf.keras.layers.Conv2D):
     def __init__(self, filters, kernel_size, tau=1.0, qconfig="distribution_aware", *args, **kwargs):
@@ -97,6 +105,7 @@ class MBQuantSimulConv2D(tf.keras.layers.Conv2D):
             self.quant_op = MBQuant_uniform
             self.tau = tf.Variable( self.tau, name="tau", trainable=True, dtype=tf.float32 )
 
+        #for LBA
         self.quant_before = tf.Variable( tf.zeros( self.kernel.shape, dtype=tf.float32 ), name="qaunt_before", trainable=False )
         self.quant_after = tf.Variable( tf.zeros( self.kernel.shape, dtype=tf.float32 ), name="quant_after", trainable=False )
         
@@ -109,7 +118,7 @@ class MBQuantSimulConv2D(tf.keras.layers.Conv2D):
         
         result = self.convolution_op( inputs, kernel_quant )
         if self.use_bias:
-            result = result + self.bias * tf.cast( tf.not_equal( self.vec_bitwidth, 0 ), tf.float32 )
+            result = result + self.bias * tf.cast( tf.not_equal( self.vec_bitwidth, 0 ), tf.float32 ) #soft pruning
         return result
     
     def get_config(self):
@@ -119,7 +128,7 @@ class MBQuantSimulConv2D(tf.keras.layers.Conv2D):
         })
         return config
 
-    
+#Dense Layer with qunatized outputs    
 @tf.keras.utils.register_keras_serializable()
 class MBQuantDense(tf.keras.layers.Dense):
     def __init__(self, units, tau=1.0, qconfig="uniform", **kwargs):
@@ -138,6 +147,7 @@ class MBQuantDense(tf.keras.layers.Dense):
             self.quant_op = MBQuant_uniform
             self.tau = tf.Variable( self.tau, name="tau", trainable=True, dtype=tf.float32 )
 
+        #for LBA
         self.quant_before = tf.Variable( tf.zeros( self.kernel.shape, dtype=tf.float32 ), name="qaunt_before", trainable=False )
         self.quant_after = tf.Variable( tf.zeros( self.kernel.shape, dtype=tf.float32 ), name="quant_after", trainable=False )
     
@@ -150,7 +160,7 @@ class MBQuantDense(tf.keras.layers.Dense):
         
         result = tf.matmul( inputs, kernel_quant )
         if self.use_bias:
-            result = result + self.bias * tf.cast( tf.not_equal( self.vec_bitwidth, 0 ), tf.float32 )
+            result = result + self.bias * tf.cast( tf.not_equal( self.vec_bitwidth, 0 ), tf.float32 ) #soft pruning
         return result
     
     def get_config(self):
@@ -160,6 +170,10 @@ class MBQuantDense(tf.keras.layers.Dense):
         })
         return config
     
+#Quantization of activations
+"""
+TODO - make vec_bitwidths initializable by an argumnet
+"""
 @tf.keras.utils.register_keras_serializable()
 class MBQuantActivation(tf.keras.layers.Layer):
     def __init__(self, tau=1.0, name=None, **kwargs):
@@ -169,12 +183,14 @@ class MBQuantActivation(tf.keras.layers.Layer):
         
     def build(self, input_shape):
         super().build(input_shape)
-        self.vec_bitwidth = tf.Variable( [4]*input_shape[-1], name="BitWidth", trainable=False, dtype=tf.int32 )
+        self.vec_bitwidth = tf.Variable( [8]*input_shape[-1], name="BitWidth", trainable=False, dtype=tf.int32 )
         self.tau = tf.Variable( self.tau, name="tau", trainable=True, dtype=tf.float32 )
-        self.grad_catcher = tf.Variable( tf.zeros( (1,) + input_shape[1:], dtype=tf.float32 ), name="GradCatcher", trainable=True )
         
+        #for LBA
         self.quant_before = tf.Variable( tf.zeros( (1,) + input_shape[1:], dtype=tf.float32 ), name="qaunt_before", trainable=False )
         self.quant_after = tf.Variable( tf.zeros( (1,) + input_shape[1:], dtype=tf.float32 ), name="quant_after", trainable=False )
+        self.grad_catcher = tf.Variable( tf.zeros( (1,) + input_shape[1:], dtype=tf.float32 ), name="GradCatcher", trainable=True )
+        #grad_catcher should remain zero after weights are updated
     
     def call(self, inputs, training=None):
         act_quant = MBQuant_uniform(inputs  + self.grad_catcher, self.vec_bitwidth, self.tau)
@@ -202,6 +218,7 @@ class MBQuantModel(tf.keras.Model):
         for idx,layer in enumerate(self.layers):
             dict_layername2layeridx[layer.name] = idx
         
+        #activation gradients accumulator
         self.activation_indices = []
         self.activation_layer_indices = []
         self.activation_accumulator = []
@@ -214,6 +231,7 @@ class MBQuantModel(tf.keras.Model):
                 self.activation_layer_indices.append( dict_layername2layeridx[layer_name] )
                 self.activation_accumulator.append( tf.Variable( tf.zeros( w.shape ), trainable=False, name="accumulated_activation" ) )
 
+        #weight gradients accumulator
         self.weight_indices = []
         self.weight_layer_indices = []
         self.weight_accumulator = []
@@ -222,7 +240,10 @@ class MBQuantModel(tf.keras.Model):
             weight_name = w.name.split("/")[1].split(":")[0]
             
             if weight_name == "kernel":
-                if type(self.get_layer(layer_name)) == MBQuantSimulConv2D and self.get_layer(layer_name).qconfig != "uniform":
+                """
+                NOTE - uniform quantizations are excluded atm
+                """
+                if self.get_layer(layer_name).qconfig != "uniform":
                     self.weight_indices.append( idx )
                     self.weight_layer_indices.append( dict_layername2layeridx[layer_name] )
                     self.weight_accumulator.append( tf.Variable( tf.zeros( w.shape ), trainable=False, name="accumulated_weight" ) )
@@ -235,9 +256,9 @@ class MBQuantModel(tf.keras.Model):
             loss = self.compiled_loss(y, pred)
 
         trainable_weights = self.trainable_weights
-        
         grads = tape.gradient(loss, trainable_weights)
         
+        #gradients accumulation
         if self.accumulate_grads:
             for idx in range(len(self.activation_indices)):
                 act_idx = self.activation_indices[idx]
@@ -248,6 +269,7 @@ class MBQuantModel(tf.keras.Model):
                 lyer_idx = self.weight_layer_indices[idx]
                 self.weight_accumulator[idx].assign_add( grads[wt_idx] * ( self.layers[lyer_idx].quant_before - self.layers[lyer_idx].quant_after ) )   
         
+        #update weights
         self.optimizer.apply_gradients(zip(grads, trainable_weights))
         self.compiled_metrics.update_state(y, pred)
         
@@ -259,43 +281,65 @@ class MBQuantModel(tf.keras.Model):
         return {m.name: m.result() for m in self.metrics}
     
 class Callback_AdjustBitWidths(tf.keras.callbacks.Callback):
-    def __init__(self, ratio_bitdecrease=0.15):
+    def __init__(self, epoch_finetune=5, ratio_bitdecrease=0.05):
         super().__init__()
         self.ratio_bitdecrease = ratio_bitdecrease
+        self.epoch_finetune = epoch_finetune
     
     def on_epoch_begin(self, epoch, logs=None):
+        #reset accumulators
         for v in self.model.activation_accumulator:
             v.assign( tf.zeros( v.shape ) )
         for v in self.model.weight_accumulator:
             v.assign( tf.zeros( v.shape ) )
 
     def on_epoch_end(self, epoch, logs=None):
+        if epoch < self.epoch_finetune:
+            return
+        
+        """
+        LBA of weights
+        """
+        
         list_key_grad = []
         list_key_lyer = []
         list_key_bitwidth_idx = []
         list_key_bitwidth = []
 
-        for idx in range(len( self.model.weight_indices )):
-            idx_lyer = self.model.weight_indices[idx]
-
-            key_grad = abs( np.sum( self.model.weight_accumulator[idx], axis=(0,1,2) ) / np.product( self.model.weight_accumulator[idx].shape[:2] ) )
-            key_lyer = np.ones( len(key_grad) ) * self.model.weight_indices[idx]
+        #deltaloss calculation for each channels
+        for idx in range(len( self.model.weight_layer_indices )):
+            idx_lyer = self.model.weight_layer_indices[idx]
+            
+            key_grad = abs( np.sum( self.model.weight_accumulator[idx], axis=tuple(range(len((self.model.weight_accumulator[idx]).shape)-1)) ) / np.product( self.model.weight_accumulator[idx].shape[:-1] ) )
+            key_lyer = np.ones( len(key_grad) ) * idx_lyer
             key_bitwidth_idx = np.arange( len(key_grad) )
-            key_bitwidth = self.model.layers[self.model.weight_indices[idx]].vec_bitwidth.numpy()
+            key_bitwidth = self.model.layers[idx_lyer].vec_bitwidth.numpy()
 
             list_key_grad.append( key_grad )
             list_key_lyer.append( key_lyer.astype(int) )
             list_key_bitwidth_idx.append( key_bitwidth_idx )
             list_key_bitwidth.append( key_bitwidth )
+            
+            self.model.weight_accumulator[idx].assign( tf.zeros( self.model.weight_accumulator[idx].shape ) )
 
         list_key_grad = np.concatenate(list_key_grad)
         list_key_lyer = np.concatenate(list_key_lyer)
         list_key_bitwidth_idx = np.concatenate(list_key_bitwidth_idx)
         list_key_bitwidth = np.concatenate(list_key_bitwidth)
 
+        #tf.print("\nWeightBitAdjust")
+        
+        #sort by deltaloss
         sorted_g = sorted( [ elem for elem in zip(list_key_grad, list_key_lyer, list_key_bitwidth_idx, list_key_bitwidth) ] )
         cnt = int(len(sorted_g)*self.ratio_bitdecrease)
         for idx, elem in enumerate( sorted_g ):
+            #tf.print(str(elem))
+            """
+            NOTE - FIRST AND LAST LAYER INDICES ARE HARDCODED ATM
+            """
+            if elem[1] in [1, 4, 91, 93]:
+                tf.print( "{} / {} / {}".format( self.model.layers[elem[1]].name, elem[2], elem[3] ) )
+                continue
             if elem[-1] == 0:
                 continue
 
@@ -305,4 +349,54 @@ class Callback_AdjustBitWidths(tf.keras.callbacks.Callback):
             if cnt == 0:
                 break
                 
-        tf.print( sorted_g )
+        """
+        LBA of activations
+        """
+                
+        list_key_grad = []
+        list_key_lyer = []
+        list_key_bitwidth_idx = []
+        list_key_bitwidth = []
+
+        #deltaloss calculation for each channels
+        for idx in range(len( self.model.activation_indices )):
+            idx_lyer = self.model.activation_layer_indices[idx]
+
+            key_grad = abs( np.sum( self.model.activation_accumulator[idx], axis=tuple(range(len((self.model.activation_accumulator[idx]).shape)-1)) ) / np.product( self.model.activation_accumulator[idx].shape[:-1] ) )
+            key_lyer = np.ones( len(key_grad) ) * idx_lyer
+            key_bitwidth_idx = np.arange( len(key_grad) )
+            key_bitwidth = self.model.layers[idx_lyer].vec_bitwidth.numpy()
+
+            list_key_grad.append( key_grad )
+            list_key_lyer.append( key_lyer.astype(int) )
+            list_key_bitwidth_idx.append( key_bitwidth_idx )
+            list_key_bitwidth.append( key_bitwidth )
+            
+            self.model.activation_accumulator[idx].assign( tf.zeros( self.model.activation_accumulator[idx].shape ) )
+
+        list_key_grad = np.concatenate(list_key_grad)
+        list_key_lyer = np.concatenate(list_key_lyer)
+        list_key_bitwidth_idx = np.concatenate(list_key_bitwidth_idx)
+        list_key_bitwidth = np.concatenate(list_key_bitwidth)
+
+        #tf.print("\nWeightBitAdjust")
+        
+        #sort by deltaloss
+        sorted_g = sorted( [ elem for elem in zip(list_key_grad, list_key_lyer, list_key_bitwidth_idx, list_key_bitwidth) ] )
+        cnt = int(len(sorted_g)*self.ratio_bitdecrease)
+        for idx, elem in enumerate( sorted_g ):
+            #tf.print(str(elem))
+            """
+            NOTE - FIRST AND LAST LAYER INDICES ARE HARDCODED ATM
+            """
+            if elem[1] in [1, 4, 91, 93]:
+                tf.print( "{} / {} / {}".format( self.model.layers[elem[1]].name, elem[2], elem[3] ) )
+                continue
+            if elem[-1] == 0:
+                continue
+
+            self.model.layers[ elem[1] ].vec_bitwidth[ elem[2] ].assign( elem[3] -1 )
+            cnt = cnt - 1
+
+            if cnt == 0:
+                break
